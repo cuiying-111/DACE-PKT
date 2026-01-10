@@ -15,13 +15,13 @@ PROJECT_CODENET_DATA = (
 )
 
 STEP5_JSONL_FILES = [
-    "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/AIZU_with_code_seq/train.jsonl",
-    "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/AIZU_with_code_seq/valid.jsonl",
-    "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/AIZU_with_code_seq/test.jsonl",
+    "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/AtCoder_with_code_seq/train.jsonl",
+    "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/AtCoder_with_code_seq/valid.jsonl",
+    "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/AtCoder_with_code_seq/test.jsonl",
 ]
 
-OUTPUT_CODE_DIR = "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/code_text/AIZU"
-LOG_DIR = "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/logs/AIZU"
+OUTPUT_CODE_DIR = "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/code_text/AtCoder"
+LOG_DIR = "/home/cuiying/projects_paper/DACE-main/data/codenet/Project_CodeNet/logs/AtCoder"
 
 os.makedirs(OUTPUT_CODE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -44,10 +44,8 @@ with open(MISSING_LOG, "w") as miss_f:
 
                 for rel_path in rec["code_path_seq"]:
                     # rel_path: data/p02388/C++/s915321514.cpp
-                    abs_src = os.path.join(
-                        PROJECT_CODENET_DATA,
-                        rel_path.replace("data/", "", 1)
-                    )
+                    rel_path_clean = rel_path[5:] if rel_path.startswith("data/") else rel_path
+                    abs_src = os.path.join(PROJECT_CODENET_DATA, rel_path_clean)
 
                     if not os.path.isfile(abs_src):
                         missing += 1
