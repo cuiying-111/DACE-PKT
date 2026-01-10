@@ -161,9 +161,14 @@ class PID_DATA(object):
                     code_seq = []
                     for rel_path in record["code_path_seq"]:
                         # rel_path: data/p02388/C++/s123.cpp
+                        # Step6 实际路径:
+                        # code_text/{dataset_name}/2388/C++/s123.cpp
+                        rel_path = rel_path.replace("data/", "", 1)
+
                         abs_path = os.path.join(
                             PROJECT_CODENET_DATA,
-                            rel_path.replace("data/", "", 1)
+                            self.dataset_name,
+                            rel_path
                         )
 
                         if os.path.isfile(abs_path):
