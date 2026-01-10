@@ -16,7 +16,7 @@ from tqdm import tqdm
 # ===============================
 # Config
 # ===============================
-DATASET_NAME = "AtCoder"   # or "AIZU"
+DATASET_NAME = "AIZU"   # or "AIZU"
 MAX_USERS = 5000           # None 表示不抽样
 RANDOM_SEED = 42
 MIN_SEQ_LEN = 20
@@ -50,7 +50,8 @@ problem_csvs = sorted(
 print(f"[{DATASET_NAME}] Problems: {len(problem_csvs)}")
 
 for csv_file in tqdm(problem_csvs, desc="Reading metadata"):
-    raw_pid = int(csv_file[1:-4])  # p02388.csv → 2388
+    pid_str = csv_file[:-4]  # p02388
+    raw_pid = int(pid_str[1:])  # 2388
     csv_path = os.path.join(META_DIR, csv_file)
 
     with open(csv_path, "r", encoding="utf-8") as f:
@@ -66,11 +67,13 @@ for csv_file in tqdm(problem_csvs, desc="Reading metadata"):
             ext = row["filename_ext"]
 
             a = 1 if status == "Accepted" else 0
-            code_path = f"data/{raw_pid}/{row['language']}/{submission_id}.{ext}"
+            # ⚠️ 关键修复：code_path 必须使用 pid_str
+            code_path = f"data/{pid_str}/{row['language']}/{submission_id}.{ext}"
 
             user_records[user_id].append({
                 "time": timestamp,
-                "raw_pid": raw_pid,
+                "raw_pid": raw_pid,     # 用于整数化
+                "pid_str": pid_str,     # 用于找源码
                 "a": a,
                 "code_path": code_path
             })
@@ -102,8 +105,11 @@ for uid, recs in user_records.items():
     for r in recs:
         if r["raw_pid"] not in raw_pid2pid:
             continue
-        pid_seq.append(raw_pid2pid[r["raw_pid"]])
-        qid_seq.append(raw_pid2pid[r["raw_pid"]])  # BePKT里qid对应知识点，这里用pid_seq
+
+        pid_int = raw_pid2pid[r["raw_pid"]]
+
+        pid_seq.append(pid_int)
+        qid_seq.append(pid_int)  # BePKT 兼容
         a_seq.append(r["a"])
         code_path_seq.append(r["code_path"])
         time_seq.append(r["time"])
