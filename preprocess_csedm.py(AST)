@@ -1,0 +1,279 @@
+'''
+    这个文件实现的是对CSEDM这个数据集的处理，这个数据集让我分成了春季和秋季的
+    分别为csedm_f和csedm_s,也就是F19和S19，
+    这个文件下面的脚本，只需要替换地址和名称就可以换数据集，CSEDM_F19和CSEDM_S19
+'''
+import pandas as pd
+import json
+import os
+from sklearn.model_selection import train_test_split
+import javalang
+from anytree import Node
+from anytree.search import findall_by_attr
+from anytree.walker import Walker
+import random
+# ===============================
+# Config
+# ===============================
+DATA_DIR = "/home/cuiying/projects_paper/DACE-main/data/csedm_f/All/Data"
+OUT_DIR  = "/home/cuiying/projects_paper/DACE-main/data/csedm_f/f19_with_code_seq"
+MIN_SEQ_LEN = 2
+
+MAX_PATH_LEN = 8
+MAX_PATH_WIDTH = 2
+
+os.makedirs(OUT_DIR, exist_ok=True)
+
+TRAIN_FILE = os.path.join(OUT_DIR, "train.jsonl")
+VALID_FILE = os.path.join(OUT_DIR, "valid.jsonl")
+TEST_FILE  = os.path.join(OUT_DIR, "test.jsonl")
+META_FILE  = os.path.join(OUT_DIR, "ast_meta.json")
+
+# AST utilities (code2vec style)
+# ===============================
+
+def get_token(node):
+    if isinstance(node, str):
+        return node
+    elif isinstance(node, set):
+        return "Modifier"
+    elif isinstance(node, javalang.ast.Node):
+        return node.__class__.__name__
+    return ""
+
+def get_children(root):
+    if isinstance(root, javalang.ast.Node):
+        children = root.children
+    elif isinstance(root, set):
+        children = list(root)
+    else:
+        children = []
+
+    def expand(lst):
+        for item in lst:
+            if isinstance(item, list):
+                yield from expand(item)
+            elif item:
+                yield item
+
+    return list(expand(children))
+
+def build_tree(cur, parent, order):
+    node = Node([order, get_token(cur)], parent=parent)
+    for i, child in enumerate(get_children(cur)):
+        build_tree(child, node, order + str(i + 1))
+
+def path_length(path):
+    return len(path)
+
+def path_width(raw):
+    return abs(int(raw[0][-1].name[0]) - int(raw[2][0].name[0]))
+
+def hash_path(p, table):
+    if p not in table:
+        table[p] = str(random.getrandbits(128))
+    return table[p]
+
+def extract_ast_paths(java_code, hash_table):
+    try:
+        tokens = javalang.tokenizer.tokenize(java_code)
+        parser = javalang.parser.Parser(tokens)
+        tree = parser.parse_member_declaration()
+    except:
+        return []
+
+    head = Node(["1", get_token(tree)])
+    for i, child in enumerate(get_children(tree)):
+        build_tree(child, head, "1" + str(i + 1))
+
+    leaves = findall_by_attr(head, name="is_leaf", value=True)
+    if len(leaves) < 2:
+        return []
+
+    max_depth = max(len(l.name[0]) for l in leaves)
+    for l in leaves:
+        l.name[0] = l.name[0].ljust(max_depth, "0")
+
+    walker = Walker()
+    triplets = []
+
+    for i in range(len(leaves) - 1):
+        for j in range(i + 1, len(leaves)):
+            raw = walker.walk(leaves[i], leaves[j])
+
+            walk = (
+                [n.name[1] for n in raw[0]] +
+                [raw[1].name[1]] +
+                [n.name[1] for n in raw[2]]
+            )
+
+            if path_length(walk) <= MAX_PATH_LEN and path_width(raw) <= MAX_PATH_WIDTH:
+                text_path = "@".join(walk)
+                h = hash_path(text_path, hash_table)
+
+                start = walk[0]
+                end   = walk[-1]
+
+                triplets.append((start, h, end))
+
+    return triplets
+
+# ===============================
+# Load raw tables
+# ===============================
+main_df = pd.read_csv(os.path.join(DATA_DIR, "MainTable.csv"))
+code_df = pd.read_csv(os.path.join(DATA_DIR, "CodeStates", "CodeStates.csv"))
+
+print("Raw MainTable rows:", len(main_df))
+
+# ===============================
+# 1. 只保留 Run.Program（一次有效提交）
+# ===============================
+main_df = main_df[main_df["EventType"] == "Run.Program"]
+
+print("Run.Program rows:", len(main_df))
+
+# ===============================
+# 2. 排序（KT 的生命线）
+# ===============================
+main_df = main_df.sort_values(
+    ["SubjectID", "AssignmentID", "ProblemID", "Order"]
+)
+
+# ===============================
+# 3. 构建 ProblemID -> qid（problem-as-skill）
+# ===============================
+unique_problems = sorted(main_df["ProblemID"].unique())
+problem2qid = {pid: idx + 1 for idx, pid in enumerate(unique_problems)}
+
+print("Total unique problems (skills):", len(problem2qid))
+
+# ===============================
+# 4. CodeStateID -> Code 映射
+# ===============================
+code_map = dict(zip(code_df["CodeStateID"], code_df["Code"]))
+
+# >>> MODIFIED <<< vocab builders
+# ===============================
+
+node2id = {"<PAD>": 0}
+path2id = {"<PAD>": 0}
+
+def get_or_add(dic, key):
+    if key not in dic:
+        dic[key] = len(dic)
+    return dic[key]
+hash_table = {}
+# ===============================
+# Build student-level sequences
+# ===============================
+all_records = []
+num_students = 0
+num_interactions = 0
+
+for sid, u_df in main_df.groupby("SubjectID"):
+    pid_seq = []
+    qid_seq = []
+    a_seq = []
+    code_seq = []
+    ast_seq = []
+    lang_seq = []
+    time_seq = []
+
+    for _, row in u_df.iterrows():
+        # problem id（从 1 开始）
+        #pid = int(row["ProblemID"]) + 1
+        pid = problem2qid[row["ProblemID"]]
+
+        # knowledge id（problem-as-skill）
+        qid = problem2qid[row["ProblemID"]]
+
+        # score -> binary correctness
+        score = row["Score"]
+        a = 1 if pd.notna(score) and score > 0 else 0
+
+        # code text
+        code = code_map.get(row["CodeStateID"], "")
+        code = str(code) if pd.notna(code) else ""
+
+        # 时间（保留原始字符串）
+        time_str = str(row["ServerTimestamp"])
+
+        raw_triplets = extract_ast_paths(code, hash_table)
+
+        # >>> MODIFIED <<< convert to ids
+        encoded = []
+        for s, p, e in raw_triplets:
+            sid_ = get_or_add(node2id, s)
+            pid_ = get_or_add(path2id, p)
+            eid_ = get_or_add(node2id, e)
+            encoded.append([sid_, pid_, eid_])
+
+        pid_seq.append(pid)
+        qid_seq.append(qid)
+        a_seq.append(a)
+        code_seq.append(code)
+        ast_seq.append(encoded)
+        lang_seq.append("java")
+        time_seq.append(time_str)
+
+    if len(pid_seq) < MIN_SEQ_LEN:
+        continue
+
+    record = {
+        "user_id": sid,
+        "pid_seq": pid_seq,
+        "qid_seq": qid_seq,
+        "a_seq": a_seq,
+        "code_seq": code_seq,
+        "ast_seq": ast_seq,
+        "lang_seq": lang_seq,
+        "time_seq": time_seq
+    }
+
+    all_records.append(record)
+    num_students += 1
+    num_interactions += len(pid_seq)
+
+print("===================================")
+print(f"Total valid students: {num_students}")
+print(f"Total interactions : {num_interactions}")
+
+NODE_VOCAB_SIZE = len(node2id)
+PATH_VOCAB_SIZE = len(path2id)
+
+with open(META_FILE, "w") as f:
+    json.dump({
+        "node_vocab_size": NODE_VOCAB_SIZE,
+        "path_vocab_size": PATH_VOCAB_SIZE
+    }, f, indent=2)
+
+print("NODE_VOCAB_SIZE:", NODE_VOCAB_SIZE)
+print("PATH_VOCAB_SIZE:", PATH_VOCAB_SIZE)
+# ===============================
+# Train / Valid / Test split
+# （按学生）
+# ===============================
+train_recs, temp_recs = train_test_split(
+    all_records, test_size=0.2, random_state=42
+)
+
+valid_recs, test_recs = train_test_split(
+    temp_recs, test_size=0.5, random_state=42
+)
+
+def dump_jsonl(records, path):
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+dump_jsonl(train_recs, TRAIN_FILE)
+dump_jsonl(valid_recs, VALID_FILE)
+dump_jsonl(test_recs, TEST_FILE)
+
+print("===================================")
+print("Saved files:")
+print(" -", TRAIN_FILE, f"({len(train_recs)} students)")
+print(" -", VALID_FILE, f"({len(valid_recs)} students)")
+print(" -", TEST_FILE,  f"({len(test_recs)} students)")
+print("Preprocess DONE.")
