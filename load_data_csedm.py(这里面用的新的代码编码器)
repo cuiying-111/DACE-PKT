@@ -83,8 +83,13 @@ def pad_ast(ast_list, max_len):
         ast_list = ast_list + [[0, 0, 0]] * pad_num
 
     return ast_list
-NODE_VOCAB_SIZE = 6015
-PATH_VOCAB_SIZE = 403927
+
+# NODE_VOCAB_SIZE = 6015   # f19
+# PATH_VOCAB_SIZE = 403927  # f19
+
+NODE_VOCAB_SIZE = 4068  # s19
+PATH_VOCAB_SIZE = 275489  # s19
+
 class PID_DATA(object):
     """
     原始 DACE PID_DATA
