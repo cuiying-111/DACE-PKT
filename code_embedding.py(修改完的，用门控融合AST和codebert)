@@ -1,0 +1,176 @@
+# ==========================================================
+# Code Representation Module
+# Semantic Encoder: CodeBERT (text-only, multi-language)
+# ==========================================================
+
+import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModel
+MAX_LEN = 512
+
+class CodeBERTEncoder(nn.Module):
+    """
+    Pure CodeBERT-based semantic code encoder.
+    No AST, no DFG, robust for multi-language student code.
+    """
+
+    SUPPORTED_LANGUAGES = [
+        "python", "java", "javascript", "c", "c++"
+    ]
+
+    def __init__(
+        self,
+        model_name: str = "/home/cuiying/packages/codebert-base",
+        device: str = "cpu"
+    ):
+        super().__init__()
+
+        self.device = device
+        self.max_length = MAX_LEN
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+
+        self.model.to(self.device)
+        self.model.eval()
+        # 冻结codebert的参数，不微调。
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+    def _encode(self, code: str) -> torch.Tensor:
+        encoded = self.tokenizer(
+            code,
+            return_tensors="pt",
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_length
+        ).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model(**encoded)
+
+        # CLS embedding
+        return outputs.last_hidden_state[:, 0, :]
+
+    def forward(self, code: str, lang: str) -> torch.Tensor:
+        """
+        Input:
+            code: source code string
+            lang: language identifier (for compatibility only)
+        Output:
+            Tensor [1, hidden_dim]
+        """
+
+        lang = lang.lower()
+
+        LANG_MAP = {
+            "python": "python",
+            "python3": "python",
+            "python2": "python",
+            "py": "python",
+
+            "c": "c",
+            "gcc": "c",
+
+            "c++": "c++",
+            "cpp": "c++",
+            "g++": "c++",
+
+            "java": "java",
+            "java8": "java",
+            "java11": "java",
+
+            "javascript": "javascript",
+            "js": "javascript",
+            "node": "javascript",
+        }
+
+        if lang not in LANG_MAP:
+            raise ValueError(f"Unsupported language: {lang}")
+
+        lang = LANG_MAP[lang]
+
+        if lang not in self.SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported language: {lang}")
+
+        return self._encode(code)
+
+class ASTPathEncoder(nn.Module):
+    """
+    code2vec-style AST path structural encoder
+    """
+
+    def __init__(
+        self,
+        node_vocab_size,
+        path_vocab_size,
+        embed_dim=128,
+        code_dim=512
+    ):
+        super().__init__()
+
+        self.node_emb = nn.Embedding(node_vocab_size, embed_dim)
+        self.path_emb = nn.Embedding(path_vocab_size, embed_dim)
+
+        self.proj = nn.Linear(embed_dim * 3, code_dim)
+        self.attn = nn.Linear(code_dim, 1)
+
+    def forward(self, ast_paths):
+        mask = (ast_paths.sum(dim=-1) != 0).unsqueeze(-1)
+
+        start = self.node_emb(ast_paths[:, :, 0])
+        path = self.path_emb(ast_paths[:, :, 1])
+        end = self.node_emb(ast_paths[:, :, 2])
+
+        h = torch.cat([start, path, end], dim=-1)
+        h = torch.tanh(self.proj(h))
+
+        score = self.attn(h)
+        score = score.masked_fill(~mask, -1e9)
+
+        alpha = torch.softmax(score, dim=1)
+
+        code_vec = torch.sum(alpha * h, dim=1)
+
+        return code_vec
+
+class HybridCodeEncoder(nn.Module):
+    def __init__(
+        self,
+        codebert_encoder,
+        ast_encoder,
+        fusion_dim=768,
+        ast_scale=0.3  # ⭐ 控制AST影响强度（非常关键）
+    ):
+        super().__init__()
+
+        self.codebert = codebert_encoder
+        self.ast_encoder = ast_encoder
+        self.ast_scale = ast_scale
+        total_dim = 768 + ast_encoder.proj.out_features
+
+        # 门控：学习是否信任结构信息
+        self.gate = nn.Linear(total_dim, 1)
+
+        # 最终映射
+        self.proj = nn.Linear(total_dim, fusion_dim)
+
+    def forward(self, code, lang, ast_paths):
+        # -------- semantic backbone --------
+        S = self.codebert(code, lang)  # [B,768]
+
+        # -------- structural signal --------
+        A = self.ast_encoder(ast_paths)  # [B,D]
+        A = self.ast_scale * A  # ⭐ 抑制噪声强度
+
+        # -------- gated trust control --------
+        gate_input = torch.cat([S, A], dim=-1)
+        g = torch.sigmoid(self.gate(gate_input))
+
+        # 如果AST有用 → g小；如果AST噪声 → g接近1（偏向语义）
+        fused_core = g * S + (1 - g) * A
+
+        # -------- final fusion projection --------
+        fused = self.proj(torch.cat([fused_core, S], dim=-1))
+
+        return fused
