@@ -113,10 +113,9 @@ class ASTPathEncoder(nn.Module):
         self.path_emb = nn.Embedding(path_vocab_size, embed_dim)
 
         self.proj = nn.Linear(embed_dim * 3, code_dim)
-        self.attn = nn.Linear(code_dim, 1)
 
     def forward(self, ast_paths):
-        mask = (ast_paths.sum(dim=-1) != 0).unsqueeze(-1)
+        mask = (ast_paths.sum(dim=-1) != 0).float().unsqueeze(-1)
 
         start = self.node_emb(ast_paths[:, :, 0])
         path = self.path_emb(ast_paths[:, :, 1])
@@ -125,12 +124,9 @@ class ASTPathEncoder(nn.Module):
         h = torch.cat([start, path, end], dim=-1)
         h = torch.tanh(self.proj(h))
 
-        score = self.attn(h)
-        score = score.masked_fill(~mask, -1e9)
-
-        alpha = torch.softmax(score, dim=1)
-
-        code_vec = torch.sum(alpha * h, dim=1)
+        # mean pooling (masked)
+        h = h * mask
+        code_vec = h.sum(dim=1) / (mask.sum(dim=1) + 1e-9)
 
         return code_vec
 
